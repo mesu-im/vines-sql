@@ -16,6 +16,9 @@ module Vines
         has_many :contacts,  :dependent => :destroy
         has_many :fragments, :dependent => :delete_all
       end
+      class DelayedMessage < ActiveRecord::Base
+        belongs_to :user
+      end
 
       # Wrap the method with ActiveRecord connection pool logic, so we properly
       # return connections to the pool when we're finished with them. This also
@@ -146,6 +149,34 @@ module Vines
       end
       with_connection :save_fragment
 
+      def delay_message(jid, message)
+        jid = JID.new(jid).bare.to_s
+
+        doc = Nokogiri::XML::Document.new
+        delay = doc.create_element('delay',
+                                   'xmlns': 'urn:xmpp:delay',
+                                   'from': message['from'],
+                                   'stamp': Time.now.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        message = message.clone
+        message.add_child(delay)
+        dm = Sql::DelayedMessage.new(jid: jid, message: message)
+        dm.save
+      end
+      with_connection :delay_message
+
+      def fetch_delayed_messages(jid)
+        jid = JID.new(jid).bare.to_s
+        return if jid.empty?
+
+        messages = []
+        Sql::DelayedMessage.where(jid: jid).each do |message|
+          messages << message
+          message.delete
+        end
+        messages
+      end
+      with_connection :fetch_delayed_messages
+
       # Create the tables and indexes used by this storage engine.
       def create_schema(args={})
         args[:force] ||= false
@@ -186,6 +217,13 @@ module Vines
             t.text    :xml,       null: false
           end
           add_index :fragments, [:user_id, :root, :namespace], unique: true
+
+          create_table :delayed_messages, force: args[:force] do |t|
+            t.integer :user_id,   null: false
+            t.string :jid,        limit: 512, null: false
+            t.text   :message,        null: false
+          end
+          add_index :delated_fragments [:jid]
         end
       end
       with_connection :create_schema, defer: false
@@ -199,6 +237,7 @@ module Vines
         # associations here rather than in the class definitions above.
         Sql::Contact.has_and_belongs_to_many :groups
         Sql::Group.has_and_belongs_to_many :contacts
+        Sql::Delayed_Message.has_and_belongs_to_many :users
       end
 
       def user_by_jid(jid)
